@@ -114,13 +114,38 @@ namespace dp {
             }
         }
 
-        ~thread_pool() {
-            wait_for_tasks();
-
+        /**
+         * @brief stops the thread pool with a non-blocking request.
+         * @details This does not clear queued tasks. But it does prevent
+         * new tasks from being generated queued.
+         */
+        void stop_non_blocking() {
+            // if stopped_ return, otherwise set to true
+            bool FALSE = false;
+            if(!stopped_.compare_exchange_strong(FALSE, true)) return;
             // stop all threads
             for (std::size_t i = 0; i < threads_.size(); ++i) {
                 threads_[i].request_stop();
                 tasks_[i].signal.release();
+            }
+        }
+
+        /**
+         * @brief stops the thread pool and waits for all queued tasks to complete.
+         * @details This does not clear queued tasks. But it does prevent
+         * new tasks from being generated queued.
+         */
+        void stop() {
+            stop_non_blocking();
+            wait_for_tasks();
+        }
+
+        /**
+         * @brief Destroy the thread pool object, calling stop() in the process.
+         */
+        ~thread_pool() {
+            stop();
+            for (std::size_t i = 0; i < threads_.size(); ++i) {
                 threads_[i].join();
             }
         }
@@ -143,6 +168,7 @@ namespace dp {
                   typename ReturnType = std::invoke_result_t<Function&&, Args&&...>>
             requires std::invocable<Function, Args...>
         [[nodiscard]] std::future<ReturnType> enqueue(Function f, Args... args) {
+            if(stopped_.load()) throw std::runtime_error("Attempted to enqueue a new task to a stopped thread pool");
 #ifdef __cpp_lib_move_only_function
             // we can do this in C++23 because we now have support for move only functions
             std::promise<ReturnType> promise;
@@ -208,6 +234,7 @@ namespace dp {
         template <typename Function, typename... Args>
             requires std::invocable<Function, Args...>
         void enqueue_detach(Function&& func, Args&&... args) {
+            if(stopped_.load()) throw std::runtime_error("Attempted to enqueue a new task to a stopped thread pool");
             enqueue_task(
                 std::move([f = std::forward<Function>(func),
                            ... largs = std::forward<Args>(args)]() mutable -> decltype(auto) {
@@ -262,6 +289,15 @@ namespace dp {
             return removed_task_count;
         }
 
+        /**
+         * @brief Check if this threadpool has been requested to stop
+         * 
+         * @return true if stopped, false otherwise
+         */
+        bool stop_requested() const {
+            return stopped_;
+        }
+
       private:
         template <typename Function>
         void enqueue_task(Function&& f) {
@@ -291,13 +327,14 @@ namespace dp {
             dp::thread_safe_queue<FunctionType> tasks{};
             std::binary_semaphore signal{0};
         };
-
+        
         std::vector<ThreadType> threads_;
         std::deque<task_item> tasks_;
         dp::thread_safe_queue<std::size_t> priority_queue_;
         // guarantee these get zero-initialized
         std::atomic_int_fast64_t unassigned_tasks_{0}, in_flight_tasks_{0};
         std::atomic_bool threads_complete_signal_{false};
+        std::atomic_bool stopped_{false};
     };
 
     /**
