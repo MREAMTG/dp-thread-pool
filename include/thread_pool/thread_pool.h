@@ -18,6 +18,7 @@
 #endif
 
 #include "thread_safe_queue.h"
+#include "queue_props.h"
 
 namespace dp {
     namespace details {
